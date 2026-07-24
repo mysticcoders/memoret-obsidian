@@ -1,7 +1,16 @@
-import { Modal, Notice, Plugin, normalizePath, type App } from "obsidian";
+import {
+  FileSystemAdapter,
+  Modal,
+  Notice,
+  Plugin,
+  normalizePath,
+  type App,
+} from "obsidian";
 import * as QRCode from "qrcode";
+import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import * as os from "node:os";
+import * as path from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Bonjour } from "bonjour-service";
 import {
@@ -19,6 +28,18 @@ const SCAN_INTERVAL_MS = 15_000;
 const LAN_PORT = 41830;
 const SERVICE_TYPE = "memoret";
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
+
+// Bound how long a client may hold a connection. IDLE_TIMEOUT_MS drops a
+// socket that stalls mid-headers or mid-body; REQUEST_TIMEOUT_MS caps a
+// request that trickles bytes forever without ever idling. Node only reaps
+// timed-out requests every CONNECTIONS_CHECK_MS (default 30s), so that
+// interval is lowered to keep the request cap meaningful.
+const IDLE_TIMEOUT_MS = 15_000;
+const REQUEST_TIMEOUT_MS = 120_000;
+const HEADERS_TIMEOUT_MS = 15_000;
+const KEEP_ALIVE_TIMEOUT_MS = 5_000;
+const CONNECTIONS_CHECK_MS = 5_000;
+const MAX_CONNECTIONS = 16;
 
 interface PluginData {
   publicKey: string;
@@ -185,9 +206,20 @@ export default class MemoretPlugin extends Plugin {
    * can discover the vault without manual IP entry.
    */
   private startLanServer(): void {
-    const server = http.createServer((req, res) => {
-      void this.handleRequest(req, res);
-    });
+    const server = http.createServer(
+      {
+        connectionsCheckingInterval: CONNECTIONS_CHECK_MS,
+        headersTimeout: HEADERS_TIMEOUT_MS,
+        requestTimeout: REQUEST_TIMEOUT_MS,
+        keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS,
+      },
+      (req, res) => {
+        void this.handleRequest(req, res);
+      },
+    );
+    server.maxConnections = MAX_CONNECTIONS;
+    server.setTimeout(IDLE_TIMEOUT_MS);
+    server.on("timeout", (socket) => socket.destroy());
     server.on("error", (err: NodeJS.ErrnoException) => {
       console.error("Memoret: LAN server error", err);
       new Notice(
@@ -312,6 +344,30 @@ export default class MemoretPlugin extends Plugin {
   }
 
   /**
+   * Persists plugin data and then restricts the data file to the owner.
+   * The Obsidian API offers no hook to create it with a mode, so the
+   * narrowing happens immediately after the write — it keeps other accounts
+   * on the machine out of the private key, but anyone who can read the
+   * vault directory as this user can still read it.
+   */
+  private async persist(): Promise<void> {
+    await this.persist();
+    if (process.platform === "win32") return;
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) return;
+    const dataPath = path.join(
+      adapter.getBasePath(),
+      this.manifest.dir ?? "",
+      "data.json",
+    );
+    try {
+      await fs.chmod(dataPath, 0o600);
+    } catch (err) {
+      console.error("Memoret: could not restrict data.json permissions", err);
+    }
+  }
+
+  /**
    * Loads the persisted keypair or generates one on first run, keeping the
    * private key inside the plugin's data.json on the desktop host.
    */
@@ -323,7 +379,7 @@ export default class MemoretPlugin extends Plugin {
         ingested: stored.ingested ?? [],
         authToken: stored.authToken ?? randomBytes(32).toString("base64url"),
       };
-      if (!stored.authToken) await this.saveData(this.data);
+      if (!stored.authToken) await this.persist();
     } else {
       const kp = await generateKeypair();
       this.data = {
@@ -332,7 +388,7 @@ export default class MemoretPlugin extends Plugin {
         authToken: randomBytes(32).toString("base64url"),
         ingested: [],
       };
-      await this.saveData(this.data);
+      await this.persist();
       new Notice("Memoret: generated new keypair — pair your device");
     }
     this.keypair = {
@@ -390,7 +446,7 @@ export default class MemoretPlugin extends Plugin {
       if (!result.duplicate) {
         this.ingested.add(result.captureId);
         this.data.ingested = [...this.ingested];
-        await this.saveData(this.data);
+        await this.persist();
         new Notice(`Memoret: captured ${result.notePath}`);
       }
       await this.app.vault.adapter.remove(path);

@@ -69,15 +69,19 @@ export async function ingestSealedBlob(
     manifest.vault_note_path,
     manifest.capture_id,
   );
-  const audioPath = await resolveDestination(
-    fs,
-    manifest.attachment_path,
-    manifest.capture_id,
-  );
-  for (const dir of new Set([parentDir(notePath), parentDir(audioPath)])) {
+  // A link capture has no recording, so there is no attachment to place.
+  const audioPath =
+    pkg.audio !== undefined && manifest.attachment_path !== undefined
+      ? await resolveDestination(fs, manifest.attachment_path, manifest.capture_id)
+      : undefined;
+  const dirs = new Set([parentDir(notePath)]);
+  if (audioPath !== undefined) dirs.add(parentDir(audioPath));
+  for (const dir of dirs) {
     if (dir.length > 0) await fs.mkdirp(dir);
   }
-  await fs.writeBinary(audioPath, pkg.audio);
+  if (pkg.audio !== undefined && audioPath !== undefined) {
+    await fs.writeBinary(audioPath, pkg.audio);
+  }
   await fs.writeText(notePath, pkg.transcript);
   return {
     captureId: manifest.capture_id,

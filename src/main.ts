@@ -14,6 +14,7 @@ import * as path from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Bonjour } from "bonjour-service";
 import {
+  CAPTURE_KINDS,
   generateKeypair,
   toBase64,
   fromBase64,
@@ -289,6 +290,12 @@ export default class MemoretPlugin extends Plugin {
           service: "memoret",
           version: this.manifest.version,
           fingerprint,
+          // Comma-separated rather than a JSON array on purpose: shipped
+          // senders decode /ping as a flat string map, and an array value
+          // makes that decode throw, which would look like the receiver had
+          // vanished. Senders that do not know the field read this receiver
+          // as voice-only.
+          capabilities: CAPTURE_KINDS.join(","),
         });
       }
       if (req.method === "POST" && req.url === "/capture") {

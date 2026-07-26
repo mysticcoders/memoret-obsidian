@@ -1,15 +1,40 @@
 export const MANIFEST_VERSION = 1;
 
+/**
+ * What a capture carries. "voice" is a recording with audio; "link" is a
+ * URL shared from elsewhere and has no audio of its own.
+ *
+ * The field is optional and absent means "voice", so every capture written
+ * before this existed stays valid. The version stays at 1 for the same
+ * reason: bumping it would make older receivers reject voice captures they
+ * handle perfectly well. Receivers advertise which kinds they accept on
+ * /ping instead, and senders check before delivering.
+ */
+export type CaptureKind = "voice" | "link";
+
+export const CAPTURE_KINDS: readonly CaptureKind[] = ["voice", "link"];
+
 export interface Manifest {
   version: number;
   capture_id: string;
   created_at: string;
   device_id: string;
   vault_note_path: string;
-  attachment_path: string;
   tags: string[];
-  duration_seconds: number;
-  transcript_model: string;
+  kind?: CaptureKind;
+  /** Required for voice captures, absent for link captures. */
+  attachment_path?: string;
+  /** Required for voice captures, absent for link captures. */
+  duration_seconds?: number;
+  /** Required for voice captures, absent for link captures. */
+  transcript_model?: string;
+}
+
+/**
+ * The kind a manifest declares, treating absence as "voice".
+ */
+export function manifestKind(manifest: Manifest): CaptureKind {
+  return manifest.kind ?? "voice";
 }
 
 const UUID_V4 =
@@ -51,11 +76,8 @@ export function validateManifest(raw: unknown): Manifest {
   if (typeof m.device_id !== "string" || m.device_id.length === 0) {
     throw new Error("manifest: device_id must be a non-empty string");
   }
-  for (const field of ["vault_note_path", "attachment_path"] as const) {
-    const value = m[field];
-    if (typeof value !== "string" || !isSafeVaultPath(value)) {
-      throw new Error(`manifest: ${field} is not a safe vault-relative path`);
-    }
+  if (typeof m.vault_note_path !== "string" || !isSafeVaultPath(m.vault_note_path)) {
+    throw new Error("manifest: vault_note_path is not a safe vault-relative path");
   }
   if (
     !Array.isArray(m.tags) ||
@@ -63,15 +85,34 @@ export function validateManifest(raw: unknown): Manifest {
   ) {
     throw new Error("manifest: tags must be an array of non-empty strings");
   }
-  if (
-    typeof m.duration_seconds !== "number" ||
-    !Number.isFinite(m.duration_seconds) ||
-    m.duration_seconds < 0
-  ) {
-    throw new Error("manifest: duration_seconds must be a non-negative number");
+  if (m.kind !== undefined && !CAPTURE_KINDS.includes(m.kind as CaptureKind)) {
+    throw new Error(`manifest: unsupported kind ${String(m.kind)}`);
   }
-  if (typeof m.transcript_model !== "string" || m.transcript_model.length === 0) {
-    throw new Error("manifest: transcript_model must be a non-empty string");
+  const kind: CaptureKind = (m.kind as CaptureKind) ?? "voice";
+
+  // The audio-bearing fields travel together: a voice capture must carry all
+  // of them, a link capture none. Allowing a half-populated manifest would
+  // leave receivers guessing whether to expect an audio entry.
+  if (kind === "voice") {
+    if (typeof m.attachment_path !== "string" || !isSafeVaultPath(m.attachment_path)) {
+      throw new Error("manifest: attachment_path is not a safe vault-relative path");
+    }
+    if (
+      typeof m.duration_seconds !== "number" ||
+      !Number.isFinite(m.duration_seconds) ||
+      m.duration_seconds < 0
+    ) {
+      throw new Error("manifest: duration_seconds must be a non-negative number");
+    }
+    if (typeof m.transcript_model !== "string" || m.transcript_model.length === 0) {
+      throw new Error("manifest: transcript_model must be a non-empty string");
+    }
+  } else {
+    for (const field of ["attachment_path", "duration_seconds", "transcript_model"] as const) {
+      if (m[field] !== undefined) {
+        throw new Error(`manifest: ${field} is not allowed on a ${kind} capture`);
+      }
+    }
   }
   return m as unknown as Manifest;
 }

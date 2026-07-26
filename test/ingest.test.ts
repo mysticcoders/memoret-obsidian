@@ -73,7 +73,7 @@ describe("ingest core", () => {
     expect(result.audioPath).toBe(manifest.attachment_path);
     expect(fs.dirs).toContain("notes");
     expect(fs.dirs).toContain("attachments");
-    expect(fs.files.get(manifest.attachment_path)).toEqual(audio);
+    expect(fs.files.get(manifest.attachment_path!)).toEqual(audio);
     expect(fs.files.get(manifest.vault_note_path)).toContain(
       manifest.capture_id,
     );
@@ -129,5 +129,35 @@ describe("ingest core", () => {
     ).rejects.toThrow();
     expect(fs.files.size).toBe(0);
     expect(fs.dirs.size).toBe(0);
+  });
+});
+
+describe("link captures", () => {
+  it("writes the note and no attachment", async () => {
+    const kp = await generateKeypair();
+    const fs = new MemoryFS();
+    const manifest: Manifest = {
+      version: 1,
+      capture_id: randomUUID(),
+      created_at: "2026-07-26T09:15:00-07:00",
+      device_id: "iphone",
+      vault_note_path: "notes/2026-07-26-0915.md",
+      tags: ["link"],
+      kind: "link",
+    };
+    const transcript = renderTranscriptNote(manifest, "https://example.com/watch");
+    const blob = await seal(buildPackage({ manifest, transcript }), kp.publicKey);
+
+    const result = await ingestSealedBlob(blob, kp, fs, new Set());
+
+    expect(result.duplicate).toBe(false);
+    expect(result.notePath).toBe(manifest.vault_note_path);
+    expect(result.audioPath).toBeUndefined();
+    expect(fs.dirs).toContain("notes");
+    expect(fs.dirs).not.toContain("attachments");
+    expect(fs.files.size).toBe(1);
+    expect(fs.files.get(manifest.vault_note_path)).toContain(
+      "https://example.com/watch",
+    );
   });
 });

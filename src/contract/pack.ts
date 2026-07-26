@@ -1,5 +1,5 @@
 import { zipSync, unzipSync } from "fflate";
-import { Manifest, validateManifest } from "./manifest.js";
+import { Manifest, manifestKind, validateManifest } from "./manifest.js";
 
 export const AUDIO_ENTRY = "audio.m4a";
 export const TRANSCRIPT_ENTRY = "transcript.md";
@@ -19,30 +19,43 @@ const MAX_ENTRY_BYTES: Record<string, number> = {
 export interface CapturePackage {
   manifest: Manifest;
   transcript: string;
-  audio: Uint8Array;
+  /** Present for voice captures, absent for link captures. */
+  audio?: Uint8Array;
 }
 
 /**
- * Builds the plaintext zip package (manifest.json + transcript.md +
- * audio.m4a) that gets sealed before leaving the device.
+ * Builds the plaintext zip package that gets sealed before leaving the
+ * device: manifest.json and transcript.md always, plus audio.m4a for a
+ * voice capture.
  */
 export function buildPackage(pkg: CapturePackage): Uint8Array {
   validateManifest(pkg.manifest);
-  return zipSync(
-    {
-      [MANIFEST_ENTRY]: new TextEncoder().encode(
-        JSON.stringify(pkg.manifest, null, 2),
-      ),
-      [TRANSCRIPT_ENTRY]: new TextEncoder().encode(pkg.transcript),
-      [AUDIO_ENTRY]: pkg.audio,
-    },
-    { level: 6, mtime: new Date(pkg.manifest.created_at) },
-  );
+  const kind = manifestKind(pkg.manifest);
+  if (kind === "voice" && pkg.audio === undefined) {
+    throw new Error("package: a voice capture must carry audio");
+  }
+  if (kind !== "voice" && pkg.audio !== undefined) {
+    throw new Error(`package: a ${kind} capture must not carry audio`);
+  }
+  const entries: Record<string, Uint8Array> = {
+    [MANIFEST_ENTRY]: new TextEncoder().encode(
+      JSON.stringify(pkg.manifest, null, 2),
+    ),
+    [TRANSCRIPT_ENTRY]: new TextEncoder().encode(pkg.transcript),
+  };
+  if (pkg.audio !== undefined) {
+    entries[AUDIO_ENTRY] = pkg.audio;
+  }
+  return zipSync(entries, {
+    level: 6,
+    mtime: new Date(pkg.manifest.created_at),
+  });
 }
 
 /**
- * Parses and validates a plaintext zip package, throwing if any of the
- * three required entries is missing or the manifest is invalid.
+ * Parses and validates a plaintext zip package, throwing if a required
+ * entry is missing or the manifest is invalid. Which entries are required
+ * follows the manifest kind: audio belongs to voice captures only.
  */
 export function parsePackage(zipBytes: Uint8Array): CapturePackage {
   const entries = unzipSync(zipBytes, {
@@ -55,7 +68,7 @@ export function parsePackage(zipBytes: Uint8Array): CapturePackage {
       return true;
     },
   });
-  for (const required of [MANIFEST_ENTRY, TRANSCRIPT_ENTRY, AUDIO_ENTRY]) {
+  for (const required of [MANIFEST_ENTRY, TRANSCRIPT_ENTRY]) {
     if (!(required in entries)) {
       throw new Error(`package: missing entry ${required}`);
     }
@@ -63,10 +76,18 @@ export function parsePackage(zipBytes: Uint8Array): CapturePackage {
   const manifest = validateManifest(
     JSON.parse(new TextDecoder().decode(entries[MANIFEST_ENTRY])),
   );
+  const kind = manifestKind(manifest);
+  const hasAudio = AUDIO_ENTRY in entries;
+  if (kind === "voice" && !hasAudio) {
+    throw new Error(`package: missing entry ${AUDIO_ENTRY}`);
+  }
+  if (kind !== "voice" && hasAudio) {
+    throw new Error(`package: a ${kind} capture must not carry ${AUDIO_ENTRY}`);
+  }
   return {
     manifest,
     transcript: new TextDecoder().decode(entries[TRANSCRIPT_ENTRY]),
-    audio: entries[AUDIO_ENTRY],
+    ...(hasAudio ? { audio: entries[AUDIO_ENTRY] } : {}),
   };
 }
 
@@ -80,14 +101,16 @@ export function renderTranscriptNote(
 ): string {
   const created = manifest.created_at.slice(0, 16);
   const tags = manifest.tags.join(", ");
+  const kind = manifestKind(manifest);
   return [
     "---",
     `created: ${created}`,
-    "source: voice",
+    `source: ${kind}`,
     `capture_id: ${manifest.capture_id}`,
     `tags: [${tags}]`,
     "---",
-    `![[${manifest.attachment_path}]]`,
+    // Only a voice capture has an attachment to embed.
+    ...(manifest.attachment_path ? [`![[${manifest.attachment_path}]]`] : []),
     "",
     transcriptText,
     "",

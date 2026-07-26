@@ -1,6 +1,9 @@
 export {
   MANIFEST_VERSION,
+  CAPTURE_KINDS,
+  type CaptureKind,
   type Manifest,
+  manifestKind,
   validateManifest,
   isSafeVaultPath,
 } from "./manifest.js";

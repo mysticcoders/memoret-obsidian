@@ -21,7 +21,12 @@ import {
   SEALED_MAGIC,
   type Keypair,
 } from "./contract/index.js";
-import { ingestSealedBlob, type Placement, type VaultFS } from "./ingest.js";
+import {
+  discard,
+  ingestSealedBlob,
+  type Placement,
+  type VaultFS,
+} from "./ingest.js";
 import { DEFAULT_SETTINGS, type MemoretSettings } from "./settings.js";
 import { MemoretSettingTab, type SettingsHost } from "./settings-tab.js";
 
@@ -82,6 +87,17 @@ class ObsidianVaultFS implements VaultFS {
       data.byteOffset + data.byteLength,
     ) as ArrayBuffer;
     await this.plugin.app.vault.createBinary(normalizePath(path), buffer);
+  }
+
+  /**
+   * Removes a file a failed ingest wrote. The adapter is used rather than
+   * the Vault API so a path the index has not caught up with still goes.
+   */
+  async remove(path: string): Promise<void> {
+    const normalized = normalizePath(path);
+    if (await this.plugin.app.vault.adapter.exists(normalized)) {
+      await this.plugin.app.vault.adapter.remove(normalized);
+    }
   }
 }
 
@@ -531,9 +547,25 @@ export default class MemoretPlugin extends Plugin implements SettingsHost {
         placement,
       );
       if (!result.duplicate) {
-        this.ingested.add(result.captureId);
-        this.data.ingested = [...this.ingested];
-        await this.persist();
+        // Recorded only once the files are down. The other order would lose
+        // a capture outright if the write then failed, and a capture
+        // arriving twice is a far better failure than one that never
+        // arrives. If recording it fails, what was written is taken back so
+        // the retry does not land a second copy alongside the first.
+        try {
+          this.ingested.add(result.captureId);
+          this.data.ingested = [...this.ingested];
+          await this.persist();
+        } catch (err) {
+          this.ingested.delete(result.captureId);
+          await discard(
+            fs,
+            [result.notePath, result.audioPath].filter(
+              (p): p is string => p !== undefined,
+            ),
+          );
+          throw err;
+        }
         new Notice(`Memoret: captured ${result.notePath}`);
       }
       await this.app.vault.adapter.remove(path);

@@ -5,6 +5,8 @@ export interface VaultFS {
   mkdirp(dir: string): Promise<void>;
   writeText(path: string, text: string): Promise<void>;
   writeBinary(path: string, data: Uint8Array): Promise<void>;
+  /** Removes a file this ingest wrote. Absent files are not an error. */
+  remove(path: string): Promise<void>;
 }
 
 export interface IngestResult {
@@ -126,6 +128,24 @@ async function resolveDestination(
 }
 
 /**
+ * Removes what a failed ingest managed to write, so a retry starts from an
+ * empty vault rather than around its own leftovers.
+ *
+ * Failures here are swallowed: the caller is already unwinding with the
+ * error that matters, and replacing it with a cleanup error would hide the
+ * reason the capture failed.
+ */
+export async function discard(fs: VaultFS, paths: readonly string[]): Promise<void> {
+  for (const path of paths) {
+    try {
+      await fs.remove(path);
+    } catch {
+      // Nothing useful to do; the original failure is still thrown.
+    }
+  }
+}
+
+/**
  * Points the note's audio embed at where the attachment actually landed.
  *
  * The sender writes the embed from its own manifest path, but the vault
@@ -198,17 +218,28 @@ export async function ingestSealedBlob(
   for (const dir of dirs) {
     if (dir.length > 0) await fs.mkdirp(dir);
   }
-  if (pkg.audio !== undefined && audioPath !== undefined) {
-    await fs.writeBinary(audioPath, pkg.audio);
+  // Audio lands before the note, so a failure between them would leave a
+  // recording nothing refers to — and the redelivery would resolve around
+  // that orphan into a collision name rather than replacing it.
+  const written: string[] = [];
+  try {
+    if (pkg.audio !== undefined && audioPath !== undefined) {
+      await fs.writeBinary(audioPath, pkg.audio);
+      written.push(audioPath);
+    }
+    // The embed the sender wrote names its own manifest path, which is only
+    // where the audio ends up when this vault neither relocates nor renames
+    // it. Written after the destination is settled, never before.
+    const transcript =
+      audioPath !== undefined && manifest.attachment_path !== undefined
+        ? rewriteAudioEmbed(pkg.transcript, manifest.attachment_path, audioPath)
+        : pkg.transcript;
+    await fs.writeText(notePath, transcript);
+    written.push(notePath);
+  } catch (err) {
+    await discard(fs, written);
+    throw err;
   }
-  // The embed the sender wrote names its own manifest path, which is only
-  // where the audio ends up when this vault neither relocates nor renames
-  // it. Written after the destination is settled, never before.
-  const transcript =
-    audioPath !== undefined && manifest.attachment_path !== undefined
-      ? rewriteAudioEmbed(pkg.transcript, manifest.attachment_path, audioPath)
-      : pkg.transcript;
-  await fs.writeText(notePath, transcript);
   return {
     captureId: manifest.capture_id,
     duplicate: false,

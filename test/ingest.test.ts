@@ -8,7 +8,8 @@ import {
   type Manifest,
   type Keypair,
 } from "../src/contract/index.js";
-import { ingestSealedBlob, type VaultFS } from "../src/ingest.js";
+import { ingestSealedBlob, placeInFolder, type VaultFS } from "../src/ingest.js";
+import { clampNumber, sanitizeFolder } from "../src/settings.js";
 
 class MemoryFS implements VaultFS {
   files = new Map<string, string | Uint8Array>();
@@ -159,5 +160,76 @@ describe("link captures", () => {
     expect(fs.files.get(manifest.vault_note_path)).toContain(
       "https://example.com/watch",
     );
+  });
+});
+
+describe("placement", () => {
+  it("keeps the manifest path when no folder is configured", () => {
+    expect(placeInFolder("notes/2026-07-22-1430.md", undefined, "2026-07-22T14:30:00Z")).toBe(
+      "notes/2026-07-22-1430.md",
+    );
+  });
+
+  it("moves a capture into the configured folder, keeping its filename", () => {
+    expect(
+      placeInFolder("notes/2026-07-22-1430.md", "Captures/Voice", "2026-07-22T14:30:00Z"),
+    ).toBe("Captures/Voice/2026-07-22-1430.md");
+  });
+
+  it("writes to the vault root when the folder is empty", () => {
+    expect(placeInFolder("notes/x.md", "", "2026-07-22T14:30:00Z")).toBe("x.md");
+  });
+
+  it("nests by year and month, or by day", () => {
+    expect(placeInFolder("notes/x.md", "Captures", "2026-07-22T14:30:00Z", "month")).toBe(
+      "Captures/2026/07/x.md",
+    );
+    expect(placeInFolder("notes/x.md", "Captures", "2026-07-22T14:30:00Z", "day")).toBe(
+      "Captures/2026/07/22/x.md",
+    );
+  });
+
+  it("flattens rather than inventing folders when the timestamp is malformed", () => {
+    expect(placeInFolder("notes/x.md", "Captures", "not-a-date", "day")).toBe(
+      "Captures/x.md",
+    );
+  });
+
+  it("takes only the filename, so a sender cannot steer the destination", () => {
+    expect(placeInFolder("a/b/c/deep.md", "Captures", "2026-07-22T14:30:00Z")).toBe(
+      "Captures/deep.md",
+    );
+  });
+
+  it("routes an ingested capture through the configured folders", async () => {
+    const kp = await generateKeypair();
+    const fs = new MemoryFS();
+    const manifest = sampleManifest();
+    const blob = await sealedBlobFor(kp, manifest);
+    const result = await ingestSealedBlob(blob, kp, fs, new Set(), {
+      noteFolder: "Inbox/Memoret",
+      attachmentFolder: "Inbox/Memoret/audio",
+      dateSubfolders: "month",
+    });
+    expect(result.notePath).toBe("Inbox/Memoret/2026/07/2026-07-22-1430.md");
+    expect(result.audioPath).toBe("Inbox/Memoret/audio/2026/07/2026-07-22-1430.m4a");
+    expect(fs.files.has(result.notePath!)).toBe(true);
+    expect(fs.files.has(result.audioPath!)).toBe(true);
+  });
+});
+
+describe("folder sanitising", () => {
+  it("strips traversal and hidden segments", () => {
+    expect(sanitizeFolder("../../etc")).toBe("etc");
+    expect(sanitizeFolder("Captures/../.obsidian")).toBe("Captures");
+    expect(sanitizeFolder("  Notes / Voice  ")).toBe("Notes/Voice");
+    expect(sanitizeFolder("")).toBe("");
+  });
+
+  it("clamps numbers from text fields and falls back on nonsense", () => {
+    expect(clampNumber("70000", 41830, 1024, 65535)).toBe(65535);
+    expect(clampNumber("80", 41830, 1024, 65535)).toBe(1024);
+    expect(clampNumber("banana", 41830, 1024, 65535)).toBe(41830);
+    expect(clampNumber("8080", 41830, 1024, 65535)).toBe(8080);
   });
 });

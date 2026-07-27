@@ -11,6 +11,15 @@ Memoret records and transcribes voice notes entirely on your iPhone or Apple Wat
 - The plugin listens on your local network (advertised via mDNS/Bonjour) and accepts sealed capture packages, verified by bearer token and key fingerprint.
 - Each capture is decrypted with libsodium `crypto_box_seal` (X25519 + XSalsa20-Poly1305), validated, and written to the vault as a Markdown note with the audio file attached. Failed or malformed blobs are quarantined, never silently dropped.
 
+## Settings
+
+- **Note folder** and **Attachment folder** — where captures land. This vault decides, not the sending device: only the filename comes from the capture, so several paired devices no longer have to agree on a layout. Leave the folder empty to write to the vault root. Defaults are `notes` and `attachments`, matching what the app has always sent, so upgrading changes nothing.
+- **Date subfolders** — optionally nest captures by `2026/07` or `2026/07/26` beneath those folders, so one directory does not grow forever.
+- **Accept captures over the local network** — turn the listener and its mDNS advertisement off entirely. The inbox is still drained, so anything already delivered still arrives.
+- **Port** — change it when something else already holds 41830. The port is part of the pairing payload, so re-pair your devices afterwards.
+- **Check every** — seconds between inbox scans. A capture arriving over the network is ingested immediately regardless; this is the safety net.
+- **Quarantined captures** — how many blobs failed to ingest, with a **Retry** button that puts them back in the inbox. Retrying is safe: anything already in the vault is recognised by its capture id and skipped.
+
 ## Where the private key lives
 
 The receiver's private key is stored in plaintext in `<vault>/.obsidian/plugins/memoret/data.json`. Obsidian's plugin API provides no encrypted storage and no hook to create that file with restrictive permissions, so **the key is only as protected as the vault directory itself**. In practice that means:

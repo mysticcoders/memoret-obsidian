@@ -1,0 +1,32 @@
+name: CI
+
+# The release workflow only runs on a tag, so until now nothing checked a
+# pull request. Changes to ingest are exactly what wants a gate.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Test
+        run: npm test
+      # Bundling is what the release does, so a bundle that cannot be built
+      # should fail here rather than at tag time.
+      - name: Build
+        run: node esbuild.config.mjs production

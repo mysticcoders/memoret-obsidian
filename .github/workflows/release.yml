@@ -18,6 +18,13 @@ jobs:
 
       - run: npm ci
 
+      # The conformance suite reads the shared corpus, which is fetched
+      # rather than vendored. Missing here once already: the tests failed
+      # loudly, which is what they are meant to do, and the release stopped.
+      - name: Fetch the conformance corpus
+        run: scripts/fetch-fixtures.sh
+
+
       - run: npm test
 
       - run: npm run build

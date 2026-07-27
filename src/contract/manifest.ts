@@ -53,6 +53,46 @@ export function isSafeVaultPath(p: string): boolean {
 }
 
 /**
+ * A date and a time with an offset — RFC 3339, which is what every sender
+ * emits.
+ *
+ * This used to be `Date.parse`, which took "March 5, 2026" and "2026" and
+ * a bare date, none of which name a moment. The Swift receiver rejected
+ * all of them, so the three implementations disagreed about what a valid
+ * capture was; see the shared corpus at
+ * github.com/mysticcoders/memoret-contract-fixtures. The offset is
+ * required because a local time is ambiguous and nothing downstream can
+ * recover which one was meant.
+ *
+ * The shape is checked first and the value second: a regex alone would
+ * admit 2026-02-30.
+ */
+const RFC3339 =
+  /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+
+function isTimestamp(value: string): boolean {
+  if (!RFC3339.test(value)) return false;
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(5, 7));
+  const day = Number(value.slice(8, 10));
+  if (month < 1 || month > 12 || day < 1) return false;
+  // The components are compared in UTC and never converted, because the
+  // offset can legitimately put a capture on a different UTC day than the
+  // one it names — an evening in California is already tomorrow in London.
+  // Date.UTC rolls an out-of-range day forward, so reading it back is what
+  // catches February 30th.
+  const rolled = new Date(Date.UTC(year, month - 1, day));
+  if (rolled.getUTCMonth() !== month - 1 || rolled.getUTCDate() !== day) {
+    return false;
+  }
+  return (
+    Number(value.slice(11, 13)) < 24 &&
+    Number(value.slice(14, 16)) < 60 &&
+    Number(value.slice(17, 19)) < 60
+  );
+}
+
+/**
  * Validates a parsed manifest object and returns it typed, throwing a
  * descriptive error on the first violation found.
  */
@@ -69,9 +109,9 @@ export function validateManifest(raw: unknown): Manifest {
   }
   if (
     typeof m.created_at !== "string" ||
-    Number.isNaN(Date.parse(m.created_at))
+    !isTimestamp(m.created_at)
   ) {
-    throw new Error("manifest: created_at must be an ISO-8601 timestamp");
+    throw new Error("manifest: created_at must be an RFC 3339 timestamp");
   }
   if (typeof m.device_id !== "string" || m.device_id.length === 0) {
     throw new Error("manifest: device_id must be a non-empty string");
@@ -94,6 +134,14 @@ export function validateManifest(raw: unknown): Manifest {
   // of them, a link capture none. Allowing a half-populated manifest would
   // leave receivers guessing whether to expect an audio entry.
   if (kind === "voice") {
+    // Absence and unsafety are reported apart. Telling someone their
+    // attachment_path is unsafe when they never sent one points at path
+    // validation instead of at the missing field.
+    for (const field of ["attachment_path", "duration_seconds", "transcript_model"] as const) {
+      if (m[field] === undefined) {
+        throw new Error(`manifest: a voice capture must carry ${field}`);
+      }
+    }
     if (typeof m.attachment_path !== "string" || !isSafeVaultPath(m.attachment_path)) {
       throw new Error("manifest: attachment_path is not a safe vault-relative path");
     }

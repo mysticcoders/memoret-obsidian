@@ -14,6 +14,65 @@ export interface IngestResult {
   audioPath?: string;
 }
 
+/** Date-derived nesting added beneath a configured folder. */
+export type DateSubfolders = "none" | "month" | "day";
+
+/**
+ * Where this vault wants captures to land.
+ *
+ * A manifest's paths are a suggestion from whichever device made the
+ * recording. Left to them, the vault's layout is decided by the phone, and
+ * every paired device has to agree on it. A folder set here wins, and only
+ * the sender's filename is kept.
+ *
+ * Every field is optional, and an absent folder keeps the manifest path
+ * untouched — which is what releases before settings existed did.
+ */
+export interface Placement {
+  noteFolder?: string;
+  attachmentFolder?: string;
+  dateSubfolders?: DateSubfolders;
+}
+
+/**
+ * Splits an ISO timestamp into the folder segments a date nesting wants,
+ * returning none if the timestamp is not a plain calendar date — a
+ * malformed one should flatten the capture into the folder, never invent
+ * directories named after garbage.
+ */
+function dateSegments(createdAt: string, mode: DateSubfolders): string[] {
+  if (mode === "none") return [];
+  const date = createdAt.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
+  const [year, month, day] = date.split("-");
+  if (year === undefined || month === undefined || day === undefined) return [];
+  return mode === "month" ? [year, month] : [year, month, day];
+}
+
+/**
+ * Rewrites a manifest path into the configured folder, keeping the
+ * sender's filename and adding any date nesting.
+ *
+ * Taking the basename also narrows what the sender controls: the filename
+ * alone, rather than the whole path. The manifest is already checked
+ * against isSafeVaultPath when the package is parsed, so this is defence
+ * in depth rather than the only guard.
+ */
+export function placeInFolder(
+  manifestPath: string,
+  folder: string | undefined,
+  createdAt: string,
+  dateSubfolders: DateSubfolders = "none",
+): string {
+  if (folder === undefined) return manifestPath;
+  const filename = manifestPath.slice(manifestPath.lastIndexOf("/") + 1);
+  const segments = [
+    ...folder.split("/"),
+    ...dateSegments(createdAt, dateSubfolders),
+  ].filter((s) => s.length > 0);
+  return [...segments, filename].join("/");
+}
+
 /**
  * Returns the parent directory of a vault-relative path, or empty string
  * for root-level paths.
@@ -58,6 +117,7 @@ export async function ingestSealedBlob(
   keypair: Keypair,
   fs: VaultFS,
   alreadyIngested: ReadonlySet<string>,
+  placement: Placement = {},
 ): Promise<IngestResult> {
   const pkg = parsePackage(await open(blob, keypair));
   const { manifest } = pkg;
@@ -66,13 +126,27 @@ export async function ingestSealedBlob(
   }
   const notePath = await resolveDestination(
     fs,
-    manifest.vault_note_path,
+    placeInFolder(
+      manifest.vault_note_path,
+      placement.noteFolder,
+      manifest.created_at,
+      placement.dateSubfolders,
+    ),
     manifest.capture_id,
   );
   // A link capture has no recording, so there is no attachment to place.
   const audioPath =
     pkg.audio !== undefined && manifest.attachment_path !== undefined
-      ? await resolveDestination(fs, manifest.attachment_path, manifest.capture_id)
+      ? await resolveDestination(
+          fs,
+          placeInFolder(
+            manifest.attachment_path,
+            placement.attachmentFolder,
+            manifest.created_at,
+            placement.dateSubfolders,
+          ),
+          manifest.capture_id,
+        )
       : undefined;
   const dirs = new Set([parentDir(notePath)]);
   if (audioPath !== undefined) dirs.add(parentDir(audioPath));

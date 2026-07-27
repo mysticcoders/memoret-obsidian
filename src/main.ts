@@ -21,12 +21,12 @@ import {
   SEALED_MAGIC,
   type Keypair,
 } from "./contract/index.js";
-import { ingestSealedBlob, type VaultFS } from "./ingest.js";
+import { ingestSealedBlob, type Placement, type VaultFS } from "./ingest.js";
+import { DEFAULT_SETTINGS, type MemoretSettings } from "./settings.js";
+import { MemoretSettingTab, type SettingsHost } from "./settings-tab.js";
 
 const INBOX_DIR = ".memoret/inbox";
 const FAILED_DIR = ".memoret/failed";
-const SCAN_INTERVAL_MS = 15_000;
-const LAN_PORT = 41830;
 const SERVICE_TYPE = "memoret";
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
 
@@ -47,6 +47,7 @@ interface PluginData {
   privateKey: string;
   authToken: string;
   ingested: string[];
+  settings?: MemoretSettings;
 }
 
 /**
@@ -130,17 +131,23 @@ class BodyTooLargeError extends Error {
   }
 }
 
-export default class MemoretPlugin extends Plugin {
+export default class MemoretPlugin extends Plugin implements SettingsHost {
+  // Narrows the base class's own `settings?: unknown` rather than shadowing
+  // it: a redeclared field would be emitted and overwrite what Obsidian put
+  // there. Assigned during load, before anything reads it.
+  declare settings: MemoretSettings;
   private keypair!: Keypair;
   private data!: PluginData;
   private ingested!: Set<string>;
   private scanning = false;
   private server: http.Server | null = null;
   private bonjour: InstanceType<typeof Bonjour> | null = null;
+  private scanTimer: number | null = null;
 
   async onload(): Promise<void> {
     await this.loadOrCreateKeypair();
     await this.ensureDir(INBOX_DIR);
+    this.addSettingTab(new MemoretSettingTab(this.app, this, this));
 
     this.addCommand({
       id: "ingest-inbox",
@@ -171,9 +178,7 @@ export default class MemoretPlugin extends Plugin {
       },
     });
 
-    this.registerInterval(
-      window.setInterval(() => void this.scanInbox(false), SCAN_INTERVAL_MS),
-    );
+    this.rescheduleScan();
     this.app.workspace.onLayoutReady(() => void this.scanInbox(false));
 
     this.startLanServer();
@@ -181,6 +186,57 @@ export default class MemoretPlugin extends Plugin {
 
   onunload(): void {
     this.stopLanServer();
+  }
+
+  /** Persists the settings alongside the keys they live beside. */
+  async saveSettings(): Promise<void> {
+    this.data.settings = this.settings;
+    await this.persist();
+  }
+
+  /**
+   * Restarts the inbox poll at the configured interval. Its own handle is
+   * kept so a settings change takes effect without a plugin reload;
+   * registerInterval still owns unload cleanup.
+   */
+  rescheduleScan(): void {
+    if (this.scanTimer !== null) window.clearInterval(this.scanTimer);
+    this.scanTimer = window.setInterval(
+      () => void this.scanInbox(false),
+      this.settings.scanIntervalSeconds * 1000,
+    );
+    this.registerInterval(this.scanTimer);
+  }
+
+  /** Rebinds the receiver after the port or the enable toggle changes. */
+  restartLanServer(): void {
+    this.stopLanServer();
+    this.startLanServer();
+  }
+
+  /** How many blobs are held aside after failing to ingest. */
+  async countQuarantined(): Promise<number> {
+    if (!(await this.app.vault.adapter.exists(FAILED_DIR))) return 0;
+    const listing = await this.app.vault.adapter.list(FAILED_DIR);
+    return listing.files.filter((f) => f.endsWith(".sealed")).length;
+  }
+
+  /**
+   * Moves quarantined blobs back into the inbox and drains it. Safe to
+   * repeat: a capture already in the vault is recognised by its id and
+   * skipped, so a retry cannot duplicate a note.
+   */
+  async retryQuarantined(): Promise<number> {
+    if (!(await this.app.vault.adapter.exists(FAILED_DIR))) return 0;
+    const listing = await this.app.vault.adapter.list(FAILED_DIR);
+    const blobs = listing.files.filter((f) => f.endsWith(".sealed"));
+    await this.ensureDir(INBOX_DIR);
+    for (const blob of blobs) {
+      const name = blob.slice(blob.lastIndexOf("/") + 1);
+      await this.app.vault.adapter.rename(blob, `${INBOX_DIR}/${name}`);
+    }
+    void this.scanInbox(false);
+    return blobs.length;
   }
 
   /**
@@ -194,7 +250,7 @@ export default class MemoretPlugin extends Plugin {
         pubkey: this.data.publicKey,
         auth_token: this.data.authToken,
         lan_hostname: hostname,
-        lan_port: LAN_PORT,
+        lan_port: this.settings.lanPort,
         label: `Obsidian (${hostname})`,
       },
       null,
@@ -207,6 +263,11 @@ export default class MemoretPlugin extends Plugin {
    * can discover the vault without manual IP entry.
    */
   private startLanServer(): void {
+    if (!this.settings.lanEnabled) {
+      console.log("Memoret: LAN receiver disabled in settings");
+      return;
+    }
+    const port = this.settings.lanPort;
     const server = http.createServer(
       {
         connectionsCheckingInterval: CONNECTIONS_CHECK_MS,
@@ -225,18 +286,20 @@ export default class MemoretPlugin extends Plugin {
       console.error("Memoret: LAN server error", err);
       new Notice(
         err.code === "EADDRINUSE"
-          ? `Memoret: port ${LAN_PORT} is already in use — LAN receiver disabled`
+          ? `Memoret: port ${String(port)} is already in use — change it in Memoret settings`
           : "Memoret: LAN server error (see console)",
       );
     });
-    server.listen(LAN_PORT, "0.0.0.0", () => {
+    server.listen(port, "0.0.0.0", () => {
       this.bonjour = new Bonjour();
       this.bonjour.publish({
         name: `Memoret (${os.hostname()})`,
         type: SERVICE_TYPE,
-        port: LAN_PORT,
+        port,
       });
-      console.log(`Memoret: LAN receiver on :${LAN_PORT}, advertising _${SERVICE_TYPE}._tcp`);
+      console.log(
+        `Memoret: LAN receiver on :${String(port)}, advertising _${SERVICE_TYPE}._tcp`,
+      );
     });
     this.server = server;
   }
@@ -358,7 +421,7 @@ export default class MemoretPlugin extends Plugin {
    * vault directory as this user can still read it.
    */
   private async persist(): Promise<void> {
-    await this.persist();
+    await this.saveData(this.data);
     if (process.platform === "win32") return;
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) return;
@@ -380,11 +443,16 @@ export default class MemoretPlugin extends Plugin {
    */
   private async loadOrCreateKeypair(): Promise<void> {
     const stored = (await this.loadData()) as PluginData | null;
+    // Merged field by field rather than wholesale, so a setting added in a
+    // later release gets its default instead of being undefined for anyone
+    // whose data.json predates it.
+    this.settings = { ...DEFAULT_SETTINGS, ...(stored?.settings ?? {}) };
     if (stored?.privateKey) {
       this.data = {
         ...stored,
         ingested: stored.ingested ?? [],
         authToken: stored.authToken ?? randomBytes(32).toString("base64url"),
+        settings: this.settings,
       };
       if (!stored.authToken) await this.persist();
     } else {
@@ -394,6 +462,7 @@ export default class MemoretPlugin extends Plugin {
         privateKey: await toBase64(kp.privateKey),
         authToken: randomBytes(32).toString("base64url"),
         ingested: [],
+        settings: this.settings,
       };
       await this.persist();
       new Notice("Memoret: generated new keypair — pair your device");
@@ -449,7 +518,18 @@ export default class MemoretPlugin extends Plugin {
   private async ingestOne(path: string, fs: VaultFS): Promise<void> {
     try {
       const bytes = new Uint8Array(await this.app.vault.adapter.readBinary(path));
-      const result = await ingestSealedBlob(bytes, this.keypair, fs, this.ingested);
+      const placement: Placement = {
+        noteFolder: this.settings.noteFolder,
+        attachmentFolder: this.settings.attachmentFolder,
+        dateSubfolders: this.settings.dateSubfolders,
+      };
+      const result = await ingestSealedBlob(
+        bytes,
+        this.keypair,
+        fs,
+        this.ingested,
+        placement,
+      );
       if (!result.duplicate) {
         this.ingested.add(result.captureId);
         this.data.ingested = [...this.ingested];

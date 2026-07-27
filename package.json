@@ -1,6 +1,6 @@
 {
   "name": "memoret-obsidian",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Memoret Obsidian desktop plugin: receives end-to-end encrypted voice captures and writes them into the vault as notes with audio attachments.",
   "private": true,
   "license": "MIT",

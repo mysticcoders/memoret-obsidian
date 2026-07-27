@@ -11,6 +11,7 @@ import {
 import {
   ingestSealedBlob,
   placeInFolder,
+  rememberedIds,
   rewriteAudioEmbed,
   type VaultFS,
 } from "../src/ingest.js";
@@ -354,5 +355,23 @@ describe("a failed write leaves nothing behind", () => {
     await expect(
       ingestSealedBlob(await sealedBlobFor(kp, sampleManifest()), kp, fs, new Set()),
     ).rejects.toThrow("disk full");
+  });
+});
+
+describe("dedupe index is bounded", () => {
+  it("keeps everything until the cap", () => {
+    const ids = new Set(Array.from({ length: 100 }, (_, i) => `id-${String(i)}`));
+    expect(rememberedIds(ids)).toHaveLength(100);
+  });
+
+  it("forgets the oldest, keeping the newest", () => {
+    // The cap is large, so this builds past it rather than assuming it.
+    const total = 50_000 + 5;
+    const ids = new Set(Array.from({ length: total }, (_, i) => `id-${String(i)}`));
+    const kept = rememberedIds(ids);
+    expect(kept).toHaveLength(50_000);
+    expect(kept.at(-1)).toBe(`id-${String(total - 1)}`);
+    expect(kept[0]).toBe("id-5");
+    expect(kept).not.toContain("id-0");
   });
 });

@@ -24,6 +24,7 @@ import {
 import {
   discard,
   ingestSealedBlob,
+  rememberedIds,
   type Placement,
   type VaultFS,
 } from "./ingest.js";
@@ -554,7 +555,12 @@ export default class MemoretPlugin extends Plugin implements SettingsHost {
         // the retry does not land a second copy alongside the first.
         try {
           this.ingested.add(result.captureId);
-          this.data.ingested = [...this.ingested];
+          this.data.ingested = rememberedIds(this.ingested);
+          // Kept in agreement with what was stored, so a long-running
+          // session does not answer differently from a fresh launch.
+          if (this.data.ingested.length < this.ingested.size) {
+            this.ingested = new Set(this.data.ingested);
+          }
           await this.persist();
         } catch (err) {
           this.ingested.delete(result.captureId);

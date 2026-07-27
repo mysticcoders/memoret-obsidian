@@ -16,6 +16,30 @@ export interface IngestResult {
   audioPath?: string;
 }
 
+/**
+ * How many capture ids the dedupe index keeps.
+ *
+ * The whole plugin data file is rewritten after every capture, so an index
+ * that only grows makes each ingest slower than the last. Forgetting the
+ * oldest ids is safe rather than merely cheap: a sender stops resending
+ * once a capture is acknowledged, so an id is only consulted again if that
+ * same blob is delivered a second time — and if a forgotten one ever is,
+ * collision resolution files it beside the original instead of overwriting
+ * it. At a hundred captures a day this is over a year of memory.
+ */
+const MAX_REMEMBERED_IDS = 50_000;
+
+/**
+ * The ids worth keeping, newest last. A Set iterates in insertion order, so
+ * the oldest are simply the ones at the front.
+ */
+export function rememberedIds(ingested: ReadonlySet<string>): string[] {
+  const all = [...ingested];
+  return all.length <= MAX_REMEMBERED_IDS
+    ? all
+    : all.slice(all.length - MAX_REMEMBERED_IDS);
+}
+
 /** Date-derived nesting added beneath a configured folder. */
 export type DateSubfolders = "none" | "month" | "day";
 

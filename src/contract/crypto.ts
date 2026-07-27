@@ -1,16 +1,20 @@
-import { createRequire } from "node:module";
 import type sodiumType from "libsodium-wrappers";
 
 /**
  * Loads the CommonJS build of libsodium-wrappers, whose ESM distribution is
- * broken. The ambient require path lets bundlers (esbuild for the Obsidian
- * plugin) statically include it; the createRequire path covers Node ESM.
+ * broken. The ambient require lets esbuild statically include it in the
+ * plugin bundle.
+ *
+ * This is the one place the vendored contract deliberately differs from the
+ * monorepo's copy, which also carries a `createRequire(import.meta.url)`
+ * fallback for Node ESM. The plugin only ever runs inside Obsidian's
+ * CommonJS context, where that branch is unreachable — and `import.meta` is
+ * empty under a CommonJS output format, so bundling it left a fallback in
+ * the artifact that could not have worked had anything reached it. esbuild
+ * warned about exactly that.
  */
 function loadSodium(): typeof sodiumType {
-  if (typeof require === "function") {
-    return require("libsodium-wrappers");
-  }
-  return createRequire(import.meta.url)("libsodium-wrappers");
+  return require("libsodium-wrappers");
 }
 
 const _sodium: typeof sodiumType = loadSodium();

@@ -22,6 +22,13 @@ jobs:
           node-version: "20"
           cache: npm
       - run: npm ci
+
+      # The corpus is shared with the other receivers and pinned to a tag,
+      # so a new expectation lands when this repository adopts it rather
+      # than the next time CI happens to run.
+      - name: Fetch the conformance corpus
+        run: scripts/fetch-fixtures.sh
+
       - name: Typecheck
         run: npx tsc --noEmit
       - name: Test

@@ -83,18 +83,32 @@ function parentDir(path: string): string {
 }
 
 /**
- * Appends a short capture-id suffix before the extension so a colliding
- * delivery never overwrites an existing vault file.
+ * Appends a suffix before the extension so a colliding delivery never
+ * overwrites an existing vault file.
  */
-function suffixPath(path: string, captureId: string): string {
-  const short = captureId.slice(0, 8);
+function suffixPath(path: string, suffix: string): string {
   const idx = path.lastIndexOf(".");
-  return idx === -1 ? `${path}-${short}` : `${path.slice(0, idx)}-${short}${path.slice(idx)}`;
+  return idx === -1
+    ? `${path}-${suffix}`
+    : `${path.slice(0, idx)}-${suffix}${path.slice(idx)}`;
 }
 
 /**
- * Picks a collision-free destination, preferring the manifest path and
- * falling back to a capture-id-suffixed variant.
+ * How many suffixed names to try before giving up. Reaching this means
+ * something is wrong with the vault rather than with the capture, and
+ * failing loudly beats spinning forever.
+ */
+const MAX_COLLISION_ATTEMPTS = 1000;
+
+/**
+ * Picks a destination nothing already occupies.
+ *
+ * The first fallback carries the whole capture id, not a prefix of it:
+ * needing a fallback at all means two captures already want one name, and
+ * truncating the id is what makes a second clash likelier. The counter
+ * after it guarantees the search ends even then — the previous version
+ * returned its single alternate without checking, so a second collision
+ * quarantined the capture in Obsidian and silently overwrote in the CLI.
  */
 async function resolveDestination(
   fs: VaultFS,
@@ -102,7 +116,38 @@ async function resolveDestination(
   captureId: string,
 ): Promise<string> {
   if (!(await fs.exists(path))) return path;
-  return suffixPath(path, captureId);
+  const withId = suffixPath(path, captureId);
+  if (!(await fs.exists(withId))) return withId;
+  for (let n = 2; n < MAX_COLLISION_ATTEMPTS; n += 1) {
+    const candidate = suffixPath(path, `${captureId}-${String(n)}`);
+    if (!(await fs.exists(candidate))) return candidate;
+  }
+  throw new Error(`no free destination for ${path}`);
+}
+
+/**
+ * Points the note's audio embed at where the attachment actually landed.
+ *
+ * The sender writes the embed from its own manifest path, but the vault
+ * decides placement and a collision can change the filename, so without
+ * this the note links to a file that is not there.
+ *
+ * The whole line is matched rather than the path alone, so a transcript
+ * that happens to quote the same text is left intact, and only the first
+ * such line is rewritten — the contract emits exactly one, immediately
+ * after the frontmatter.
+ */
+export function rewriteAudioEmbed(
+  transcript: string,
+  fromPath: string,
+  toPath: string,
+): string {
+  if (fromPath === toPath) return transcript;
+  const lines = transcript.split("\n");
+  const index = lines.indexOf(`![[${fromPath}]]`);
+  if (index === -1) return transcript;
+  lines[index] = `![[${toPath}]]`;
+  return lines.join("\n");
 }
 
 /**
@@ -156,7 +201,14 @@ export async function ingestSealedBlob(
   if (pkg.audio !== undefined && audioPath !== undefined) {
     await fs.writeBinary(audioPath, pkg.audio);
   }
-  await fs.writeText(notePath, pkg.transcript);
+  // The embed the sender wrote names its own manifest path, which is only
+  // where the audio ends up when this vault neither relocates nor renames
+  // it. Written after the destination is settled, never before.
+  const transcript =
+    audioPath !== undefined && manifest.attachment_path !== undefined
+      ? rewriteAudioEmbed(pkg.transcript, manifest.attachment_path, audioPath)
+      : pkg.transcript;
+  await fs.writeText(notePath, transcript);
   return {
     captureId: manifest.capture_id,
     duplicate: false,

@@ -8,7 +8,12 @@ import {
   type Manifest,
   type Keypair,
 } from "../src/contract/index.js";
-import { ingestSealedBlob, placeInFolder, type VaultFS } from "../src/ingest.js";
+import {
+  ingestSealedBlob,
+  placeInFolder,
+  rewriteAudioEmbed,
+  type VaultFS,
+} from "../src/ingest.js";
 import { clampNumber, sanitizeFolder } from "../src/settings.js";
 
 class MemoryFS implements VaultFS {
@@ -105,8 +110,9 @@ describe("ingest core", () => {
       fs,
       new Set(),
     );
-    const short = manifest.capture_id.slice(0, 8);
-    expect(result.notePath).toBe(`notes/2026-07-22-1430-${short}.md`);
+    // The whole capture id, not a prefix of it: a suffix that collides in
+    // turn is what the truncated form made likelier.
+    expect(result.notePath).toBe(`notes/2026-07-22-1430-${manifest.capture_id}.md`);
     expect(fs.files.get(manifest.vault_note_path)).toBe("pre-existing note");
     expect(result.audioPath).toBe(manifest.attachment_path);
   });
@@ -231,5 +237,89 @@ describe("folder sanitising", () => {
     expect(clampNumber("80", 41830, 1024, 65535)).toBe(1024);
     expect(clampNumber("banana", 41830, 1024, 65535)).toBe(41830);
     expect(clampNumber("8080", 41830, 1024, 65535)).toBe(8080);
+  });
+});
+
+describe("audio embed follows the attachment", () => {
+  it("rewrites the embed when placement moves the attachment", async () => {
+    const kp = await generateKeypair();
+    const fs = new MemoryFS();
+    const manifest = sampleManifest();
+    const blob = await sealedBlobFor(kp, manifest);
+    const result = await ingestSealedBlob(blob, kp, fs, new Set(), {
+      noteFolder: "Captures",
+      attachmentFolder: "Captures/audio",
+      dateSubfolders: "month",
+    });
+    const note = fs.files.get(result.notePath!) as string;
+    expect(result.audioPath).toBe("Captures/audio/2026/07/2026-07-22-1430.m4a");
+    expect(note).toContain(`![[${result.audioPath!}]]`);
+    expect(note).not.toContain("![[attachments/2026-07-22-1430.m4a]]");
+  });
+
+  it("rewrites the embed when a collision renames the attachment", async () => {
+    const kp = await generateKeypair();
+    const fs = new MemoryFS();
+    const manifest = sampleManifest();
+    await fs.writeBinary("attachments/2026-07-22-1430.m4a", new Uint8Array([9]));
+    const blob = await sealedBlobFor(kp, manifest);
+    const result = await ingestSealedBlob(blob, kp, fs, new Set());
+    expect(result.audioPath).not.toBe("attachments/2026-07-22-1430.m4a");
+    const note = fs.files.get(result.notePath!) as string;
+    expect(note).toContain(`![[${result.audioPath!}]]`);
+  });
+
+  it("leaves a link capture's note alone", async () => {
+    const kp = await generateKeypair();
+    const fs = new MemoryFS();
+    const manifest = sampleManifest({
+      kind: "link",
+      attachment_path: undefined,
+      duration_seconds: undefined,
+      transcript_model: undefined,
+    });
+    const zip = buildPackage({
+      manifest,
+      transcript: renderTranscriptNote(manifest, "https://example.com/x"),
+    });
+    const result = await ingestSealedBlob(await seal(zip, kp.publicKey), kp, fs, new Set(), {
+      noteFolder: "Captures",
+    });
+    expect(result.audioPath).toBeUndefined();
+    expect(fs.files.get(result.notePath!) as string).toContain("https://example.com/x");
+  });
+
+  it("does not touch an identical line elsewhere in the transcript", () => {
+    const note = [
+      "---",
+      "created: 2026-07-22T14:30",
+      "---",
+      "![[attachments/a.m4a]]",
+      "",
+      "I wrote ![[attachments/a.m4a]] in my notes",
+      "![[attachments/a.m4a]]",
+    ].join("\n");
+    const out = rewriteAudioEmbed(note, "attachments/a.m4a", "Audio/a.m4a");
+    expect(out.split("\n")[3]).toBe("![[Audio/a.m4a]]");
+    expect(out).toContain("I wrote ![[attachments/a.m4a]] in my notes");
+    expect(out.split("\n")[6]).toBe("![[attachments/a.m4a]]");
+  });
+});
+
+describe("collision resolution is exhaustive", () => {
+  it("keeps looking past an occupied suffixed name", async () => {
+    const kp = await generateKeypair();
+    const fs = new MemoryFS();
+    const manifest = sampleManifest();
+    const id = manifest.capture_id;
+    await fs.writeText("notes/2026-07-22-1430.md", "taken");
+    await fs.writeText(`notes/2026-07-22-1430-${id}.md`, "also taken");
+    await fs.writeBinary("attachments/2026-07-22-1430.m4a", new Uint8Array([9]));
+    await fs.writeBinary(`attachments/2026-07-22-1430-${id}.m4a`, new Uint8Array([9]));
+    const result = await ingestSealedBlob(await sealedBlobFor(kp, manifest), kp, fs, new Set());
+    expect(result.notePath).toBe(`notes/2026-07-22-1430-${id}-2.md`);
+    expect(result.audioPath).toBe(`attachments/2026-07-22-1430-${id}-2.m4a`);
+    expect(fs.files.get("notes/2026-07-22-1430.md")).toBe("taken");
+    expect(fs.files.get(`notes/2026-07-22-1430-${id}.md`)).toBe("also taken");
   });
 });

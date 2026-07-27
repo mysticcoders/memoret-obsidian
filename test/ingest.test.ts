@@ -32,6 +32,9 @@ class MemoryFS implements VaultFS {
   async writeBinary(path: string, data: Uint8Array): Promise<void> {
     this.files.set(path, data);
   }
+  async remove(path: string): Promise<void> {
+    this.files.delete(path);
+  }
 }
 
 function sampleManifest(overrides: Partial<Manifest> = {}): Manifest {
@@ -321,5 +324,35 @@ describe("collision resolution is exhaustive", () => {
     expect(result.audioPath).toBe(`attachments/2026-07-22-1430-${id}-2.m4a`);
     expect(fs.files.get("notes/2026-07-22-1430.md")).toBe("taken");
     expect(fs.files.get(`notes/2026-07-22-1430-${id}.md`)).toBe("also taken");
+  });
+});
+
+describe("a failed write leaves nothing behind", () => {
+  it("removes the audio when the note cannot be written", async () => {
+    const kp = await generateKeypair();
+    const fs = new MemoryFS();
+    fs.writeText = async () => {
+      throw new Error("disk full");
+    };
+    const manifest = sampleManifest();
+    await expect(
+      ingestSealedBlob(await sealedBlobFor(kp, manifest), kp, fs, new Set()),
+    ).rejects.toThrow("disk full");
+    // The recording must not survive the note that was to refer to it.
+    expect(fs.files.has(manifest.attachment_path!)).toBe(false);
+  });
+
+  it("still reports the original failure when cleanup also fails", async () => {
+    const kp = await generateKeypair();
+    const fs = new MemoryFS();
+    fs.writeText = async () => {
+      throw new Error("disk full");
+    };
+    fs.remove = async () => {
+      throw new Error("read-only vault");
+    };
+    await expect(
+      ingestSealedBlob(await sealedBlobFor(kp, sampleManifest()), kp, fs, new Set()),
+    ).rejects.toThrow("disk full");
   });
 });

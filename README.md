@@ -9,7 +9,7 @@ Memoret records and transcribes voice notes entirely on your iPhone or Apple Wat
 - On first load the plugin generates an X25519 keypair and stores it in the plugin's data file. The private key never leaves your desktop.
 - Run the **Show pairing QR code** command and scan it with the Memoret app. The QR contains only the public key and connection details; nothing secret is displayed or transmitted.
 - The plugin listens on your local network (advertised via mDNS/Bonjour) and accepts sealed capture packages, verified by bearer token and key fingerprint.
-- Each capture is decrypted with libsodium `crypto_box_seal` (X25519 + XSalsa20-Poly1305), validated, and written to the vault as a Markdown note with the audio file attached. Failed or malformed blobs are quarantined, never silently dropped.
+- Each capture is decrypted with HPKE (RFC 9180, `DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20-Poly1305`), validated, and written to the vault as a Markdown note with the audio file attached. Failed or malformed blobs are quarantined, never silently dropped.
 
 ## Settings
 
@@ -48,7 +48,7 @@ npm test
 npm run build
 ```
 
-The build bundles to `dist/main.js`. The Memoret delivery protocol (package format, manifest schema, sealed-box crypto) is vendored under `src/contract/`; the canonical contract lives in the main Memoret project and is kept byte-compatible with the iOS sender and the terminal receiver.
+The build bundles to `dist/main.js`. The Memoret delivery protocol (package format, manifest schema, HPKE sealing) is vendored under `src/contract/`; the canonical contract lives in the main Memoret project and is kept byte-compatible with the iOS sender and the terminal receiver.
 
 ## License
 

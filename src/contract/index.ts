@@ -18,6 +18,8 @@ export {
 } from "./pack.js";
 export {
   SEALED_MAGIC,
+  SEALED_VERSION,
+  SEALED_HEADER,
   type Keypair,
   generateKeypair,
   seal,

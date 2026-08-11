@@ -1,6 +1,6 @@
 {
   "name": "memoret-obsidian",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Memoret Obsidian desktop plugin: receives end-to-end encrypted voice captures and writes them into the vault as notes with audio attachments.",
   "private": true,
   "license": "MIT",
@@ -11,13 +11,14 @@
     "fixtures": "scripts/fetch-fixtures.sh"
   },
   "dependencies": {
+    "@hpke/chacha20poly1305": "^1.8.0",
+    "@hpke/core": "^1.9.0",
+    "@hpke/dhkem-x25519": "^1.8.0",
     "bonjour-service": "^1.4.3",
     "fflate": "^0.8.2",
-    "libsodium-wrappers": "^0.7.15",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
-    "@types/libsodium-wrappers": "^0.7.14",
     "@types/node": "^24.0.0",
     "@types/qrcode": "^1.5.6",
     "esbuild": "^0.24.0",

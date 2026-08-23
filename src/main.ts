@@ -11,7 +11,7 @@ import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { Bonjour } from "bonjour-service";
 import {
   CAPTURE_KINDS,
@@ -28,6 +28,7 @@ import {
   type Placement,
   type VaultFS,
 } from "./ingest.js";
+import { fingerprintOf, receiverHost } from "./identity.js";
 import { DEFAULT_SETTINGS, type MemoretSettings } from "./settings.js";
 import { MemoretSettingTab, type SettingsHost } from "./settings-tab.js";
 
@@ -257,18 +258,26 @@ export default class MemoretPlugin extends Plugin implements SettingsHost {
   }
 
   /**
+   * This receiver's fingerprint, derived from the keypair it already holds.
+   */
+  private fingerprint(): string {
+    return fingerprintOf(this.data.publicKey);
+  }
+
+  /**
    * Renders the pairing payload the QR flow (and any manual setup) uses to
    * configure a capture device in one step.
    */
   private pairingInfo(): string {
-    const hostname = os.hostname().replace(/\.local$/, "");
     return JSON.stringify(
       {
         pubkey: this.data.publicKey,
         auth_token: this.data.authToken,
-        lan_hostname: hostname,
+        // The name this plugin publishes, not the machine's own. A machine
+        // name can be reassigned underneath a saved pairing; this one cannot.
+        lan_hostname: receiverHost(this.fingerprint()),
         lan_port: this.settings.lanPort,
-        label: `Obsidian (${hostname})`,
+        label: `Obsidian (${os.hostname().replace(/\.local$/, "")})`,
       },
       null,
       2,
@@ -311,6 +320,11 @@ export default class MemoretPlugin extends Plugin implements SettingsHost {
       this.bonjour = new Bonjour();
       this.bonjour.publish({
         name: `Memoret (${os.hostname()})`,
+        // Without this, bonjour-service publishes A records under
+        // os.hostname() — claiming the machine's own name from a second mDNS
+        // responder, which macOS resolves by renaming itself and keeping the
+        // new name. See receiverHost.
+        host: `${receiverHost(this.fingerprint())}.local`,
         type: SERVICE_TYPE,
         port,
       });
@@ -362,14 +376,10 @@ export default class MemoretPlugin extends Plugin implements SettingsHost {
     };
     try {
       if (req.method === "GET" && req.url === "/ping") {
-        const fingerprint = createHash("sha256")
-          .update(Buffer.from(this.data.publicKey, "base64"))
-          .digest("hex")
-          .slice(0, 16);
         return respond(200, {
           service: "memoret",
           version: this.manifest.version,
-          fingerprint,
+          fingerprint: this.fingerprint(),
           // Comma-separated rather than a JSON array on purpose: shipped
           // senders decode /ping as a flat string map, and an array value
           // makes that decode throw, which would look like the receiver had

@@ -18,7 +18,6 @@ import {
   generateKeypair,
   toBase64,
   fromBase64,
-  SEALED_MAGIC,
   type Keypair,
 } from "./contract/index.js";
 import {
@@ -29,6 +28,8 @@ import {
   type VaultFS,
 } from "./ingest.js";
 import { fingerprintOf, receiverHost } from "./identity.js";
+import { collectDrop, dropFolder, isSealedBlob } from "./icloud-drop.js";
+import { advertisedAddresses } from "./network.js";
 import { DEFAULT_SETTINGS, type MemoretSettings } from "./settings.js";
 import { MemoretSettingTab, type SettingsHost } from "./settings-tab.js";
 
@@ -36,6 +37,8 @@ const INBOX_DIR = ".memoret/inbox";
 const FAILED_DIR = ".memoret/failed";
 const SERVICE_TYPE = "memoret";
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
+const ICLOUD_POLL_MS = 10_000;
+const ADDRESS_POLL_MS = 10_000;
 
 // Bound how long a client may hold a connection. IDLE_TIMEOUT_MS drops a
 // socket that stalls mid-headers or mid-body; REQUEST_TIMEOUT_MS caps a
@@ -161,6 +164,8 @@ export default class MemoretPlugin extends Plugin implements SettingsHost {
   private server: http.Server | null = null;
   private bonjour: InstanceType<typeof Bonjour> | null = null;
   private scanTimer: number | null = null;
+  private collecting = false;
+  private advertisedSignature: string | null = null;
 
   async onload(): Promise<void> {
     await this.loadOrCreateKeypair();
@@ -200,6 +205,14 @@ export default class MemoretPlugin extends Plugin implements SettingsHost {
     this.app.workspace.onLayoutReady(() => void this.scanInbox(false));
 
     this.startLanServer();
+
+    this.registerInterval(
+      window.setInterval(() => void this.collectFromICloud(), ICLOUD_POLL_MS),
+    );
+    this.app.workspace.onLayoutReady(() => void this.collectFromICloud());
+    this.registerInterval(
+      window.setInterval(() => this.republishIfMoved(), ADDRESS_POLL_MS),
+    );
   }
 
   onunload(): void {
@@ -277,6 +290,7 @@ export default class MemoretPlugin extends Plugin implements SettingsHost {
         // name can be reassigned underneath a saved pairing; this one cannot.
         lan_hostname: receiverHost(this.fingerprint()),
         lan_port: this.settings.lanPort,
+        transports: this.transports(),
         label: `Obsidian (${os.hostname().replace(/\.local$/, "")})`,
       },
       null,
@@ -318,21 +332,59 @@ export default class MemoretPlugin extends Plugin implements SettingsHost {
     });
     server.listen(port, "0.0.0.0", () => {
       this.bonjour = new Bonjour();
-      this.bonjour.publish({
-        name: `Memoret (${os.hostname()})`,
-        // Without this, bonjour-service publishes A records under
-        // os.hostname() — claiming the machine's own name from a second mDNS
-        // responder, which macOS resolves by renaming itself and keeping the
-        // new name. See receiverHost.
-        host: `${receiverHost(this.fingerprint())}.local`,
-        type: SERVICE_TYPE,
-        port,
-      });
+      this.advertise(port, true);
       console.log(
         `Memoret: LAN receiver on :${String(port)}, advertising _${SERVICE_TYPE}._tcp`,
       );
     });
     this.server = server;
+  }
+
+  /**
+   * Publishes the service, recording which addresses its records were
+   * built from so a later network change can be noticed.
+   *
+   * `probe` is skipped when re-publishing: the name was held a moment ago,
+   * and a peer still answering from its cache of the old records would
+   * otherwise read as a conflict and stop the service outright.
+   */
+  private advertise(port: number, probe: boolean): void {
+    this.advertisedSignature = advertisedAddresses(os.networkInterfaces());
+    this.bonjour?.publish({
+      name: `Memoret (${os.hostname()})`,
+      // Without this, bonjour-service publishes A records under
+      // os.hostname() — claiming the machine's own name from a second mDNS
+      // responder, which macOS resolves by renaming itself and keeping the
+      // new name. See receiverHost.
+      host: `${receiverHost(this.fingerprint())}.local`,
+      type: SERVICE_TYPE,
+      port,
+      probe,
+    });
+  }
+
+  /**
+   * Publishes again when the machine's addresses have changed since the
+   * last publish.
+   *
+   * bonjour-service builds the A and AAAA records once and keeps answering
+   * with them, so a Mac that moves networks goes on advertising
+   * `memoret-<fingerprint>.local` at addresses it no longer holds, and every
+   * sender resolving that name fails until the plugin is reloaded. Its
+   * multicast socket already follows interface changes; only the records
+   * go stale.
+   */
+  private republishIfMoved(): void {
+    const bonjour = this.bonjour;
+    if (bonjour === null || this.advertisedSignature === null) return;
+    if (advertisedAddresses(os.networkInterfaces()) === this.advertisedSignature) return;
+    const port = this.settings.lanPort;
+    this.advertisedSignature = null;
+    bonjour.unpublishAll(() => {
+      if (this.bonjour !== bonjour) return;
+      this.advertise(port, false);
+      console.log("Memoret: network changed, re-advertised the LAN receiver");
+    });
   }
 
   /**
@@ -343,9 +395,61 @@ export default class MemoretPlugin extends Plugin implements SettingsHost {
     this.bonjour?.unpublishAll();
     this.bonjour?.destroy();
     this.bonjour = null;
+    this.advertisedSignature = null;
     this.server?.closeAllConnections();
     this.server?.close();
     this.server = null;
+  }
+
+  /**
+   * The routes a sender may use to reach this receiver, comma-separated.
+   *
+   * A string rather than an array for the same reason as `capabilities`:
+   * senders decode /ping as a flat string map. Senders only leave captures
+   * in iCloud Drive for a receiver that says here it collects them, so an
+   * older plugin, or one with collection off, is never handed captures it
+   * would leave sitting there.
+   */
+  private transports(): string {
+    return this.icloudCollectionActive() ? "lan,icloud" : "lan";
+  }
+
+  /** Whether this receiver collects from iCloud Drive at all. */
+  private icloudCollectionActive(): boolean {
+    return process.platform === "darwin" && this.settings.icloudCollect;
+  }
+
+  /**
+   * Collects captures the phone left in iCloud Drive and drains the inbox
+   * when any arrived. Overlapping passes are skipped rather than queued:
+   * the next poll picks up whatever this one did not.
+   */
+  private async collectFromICloud(): Promise<void> {
+    if (!this.icloudCollectionActive() || this.collecting) return;
+    this.collecting = true;
+    try {
+      const result = await collectDrop(
+        dropFolder(os.homedir(), this.fingerprint()),
+        {
+          readdir: (dir) => fs.readdir(dir),
+          readFile: async (file) => new Uint8Array(await fs.readFile(file)),
+          unlink: (file) => fs.unlink(file),
+        },
+        async (blob) => {
+          const name = `icloud-${Date.now()}-${randomBytes(4).toString("hex")}.sealed`;
+          await this.ensureDir(INBOX_DIR);
+          await this.app.vault.adapter.writeBinary(
+            `${INBOX_DIR}/${name}`,
+            blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength) as ArrayBuffer,
+          );
+        },
+      );
+      if (result.collected > 0) void this.scanInbox(false);
+    } catch (err) {
+      console.error("Memoret: iCloud Drive collection failed", err);
+    } finally {
+      this.collecting = false;
+    }
   }
 
   /**
@@ -386,6 +490,7 @@ export default class MemoretPlugin extends Plugin implements SettingsHost {
           // vanished. Senders that do not know the field read this receiver
           // as voice-only.
           capabilities: CAPTURE_KINDS.join(","),
+          transports: this.transports(),
         });
       }
       if (req.method === "POST" && req.url === "/capture") {
@@ -393,10 +498,7 @@ export default class MemoretPlugin extends Plugin implements SettingsHost {
           return respond(401, { error: "unauthorized" });
         }
         const blob = await this.readBody(req);
-        if (
-          blob.length < SEALED_MAGIC.length ||
-          !SEALED_MAGIC.every((b, i) => blob[i] === b)
-        ) {
+        if (!isSealedBlob(blob)) {
           return respond(400, { error: "not a VVSB sealed blob" });
         }
         const name = `lan-${Date.now()}-${randomBytes(4).toString("hex")}.sealed`;

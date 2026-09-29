@@ -10,6 +10,8 @@ export interface MemoretSettings {
   lanEnabled: boolean;
   lanPort: number;
   scanIntervalSeconds: number;
+  /** Whether captures the phone leaves in iCloud Drive are collected. macOS only. */
+  icloudCollect: boolean;
 }
 
 /**
@@ -24,6 +26,7 @@ export const DEFAULT_SETTINGS: MemoretSettings = {
   lanEnabled: true,
   lanPort: 41830,
   scanIntervalSeconds: 15,
+  icloudCollect: true,
 };
 
 /**

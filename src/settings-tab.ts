@@ -122,6 +122,22 @@ export class MemoretSettingTab extends PluginSettingTab {
           }),
       );
 
+    if (process.platform === "darwin") {
+      new Setting(containerEl).setName("iCloud Drive").setHeading();
+
+      new Setting(containerEl)
+        .setName("Collect captures from iCloud Drive")
+        .setDesc(
+          "When your phone cannot reach this Mac on the network, it can leave encrypted captures in iCloud Drive instead. Only this vault's key opens them. Needs the phone and this Mac signed in to the same Apple ID.",
+        )
+        .addToggle((toggle) =>
+          toggle.setValue(this.host.settings.icloudCollect).onChange(async (value) => {
+            this.host.settings.icloudCollect = value;
+            await this.host.saveSettings();
+          }),
+        );
+    }
+
     new Setting(containerEl).setName("Inbox").setHeading();
 
     new Setting(containerEl)
